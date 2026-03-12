@@ -59,7 +59,10 @@ def main():
     mitigator = Mitigator(
         backend=cfg.mitigation_backend,
         block_seconds=cfg.block_seconds,
-        allowlist_cidrs=getattr(cfg, "allowlist_cidrs", [])
+        allowlist_cidrs=getattr(cfg, "allowlist_cidrs", []),
+        redis_host=cfg.redis_host,
+        redis_port=cfg.redis_port,
+        redis_db=cfg.redis_db,
     )
 
     logger = EventLogger(events_path=cfg.events_log_path, blocked_path=cfg.blocked_log_path)
@@ -103,7 +106,10 @@ def main():
                     if ip.startswith("127.") or ip == "0.0.0.0":
                         continue
 
-                    res = mitigator.block_ip(ip)
+                    res = mitigator.block_ip(
+                        ip,
+                        reason=f"attack:{decision.attack_type}:{decision.severity}:score={decision.risk_score:.0f}"
+                    )
                     logger.log_block(
                         ip=ip,
                         reason=f"attack:{decision.attack_type}:{decision.severity}:score={decision.risk_score:.0f}",
@@ -113,12 +119,9 @@ def main():
                     )
                     if res.ok:
                         blocks += 1
-
-                active = sum(
-                    1 for _, until in mitigator._blocked_until.items()
-                    if until > time.time()
-                ) if hasattr(mitigator, "_blocked_until") else 0
-
+                
+                active = mitigator.active_block_count()
+                
                 print(
                     f"[!] ATTACK type={decision.attack_type} sev={decision.severity} score={decision.risk_score:.0f} "
                     f"blocked={blocks} active_blocks={active} "

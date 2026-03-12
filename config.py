@@ -42,7 +42,8 @@ class Config:
     attack_off_windows: int = 3
 
     # Mitigation
-    mitigation_backend: str = "sim"  # "sim", "none", "iptables", "nft", "ipset"
+    # mitigation_backend: str = "sim"  # "sim", "none", "iptables", "nft", "ipset"
+    mitigation_backend: str = "redis"
     block_seconds: int = 10
     max_blocks_per_tick: int = 50
     allowlist_cidrs = ["127.0.0.0/8", "192.168.0.0/16"]
@@ -51,3 +52,9 @@ class Config:
     logs_dir: str = "logs"
     events_log_path: str = "logs/events.log"
     blocked_log_path: str = "logs/blocked_ips.log"
+
+    # Redis
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_db: int = 0
+    redis_enabled: bool = True

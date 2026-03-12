@@ -1,0 +1,4 @@
+# external dependencies used by the project
+scapy>=2.4.5             # packet capture (optional; required for live mode)
+matplotlib>=3.7.0         # plotting utilities for report_plot.py
+redis>=4.0.0             # Redis-based mitigation or caching

@@ -129,12 +129,29 @@ class HybridDetector:
 
     
     def _classify(self, snap: FeatureSnapshot) -> str:
-        # SYN flood
-        if snap.tcp_ratio >= 0.6 and snap.syn_ratio >= 0.6 and snap.syn_ack_ratio >= 3.0:
+        # ----------------------------------------------------
+        # Distributed flood (botnet-like attack)
+        # Many IPs + high entropy + high traffic
+        # ----------------------------------------------------
+        if (
+            snap.unique_ip_count >= self.unique_ip_threshold * 0.7
+            and snap.src_ip_entropy >= 5.5
+            and snap.packets_per_second >= self.pps_threshold * 0.8
+        ):
+            return "distributed_flood"
+
+        # ----------------------------------------------------
+        # SYN flood (single or few attackers)
+        # ----------------------------------------------------
+        if (
+            snap.tcp_ratio >= 0.6
+            and snap.syn_ratio >= 0.6
+            and snap.syn_ack_ratio >= 3.0
+        ):
             return "syn_flood"
 
         # ----------------------------------------------------
-        # TCP ACK flood (single IP abusing ACK packets)
+        # TCP ACK flood
         # ----------------------------------------------------
         ack_ratio = (
             snap.ack_packet_rate / snap.packets_per_second
@@ -150,11 +167,15 @@ class HybridDetector:
         ):
             return "tcp_ack_flood"
 
+        # ----------------------------------------------------
         # UDP flood
+        # ----------------------------------------------------
         if snap.udp_ratio >= 0.6 and snap.packets_per_second >= self.pps_threshold * 0.6:
             return "udp_flood"
 
-        # Flash crowd (legitimate surge)
+        # ----------------------------------------------------
+        # Flash crowd (legitimate traffic spike)
+        # ----------------------------------------------------
         if (
             snap.packets_per_second >= self.pps_threshold * 0.9
             and snap.ack_packet_rate >= self.legit_ack_rate_min
@@ -163,16 +184,7 @@ class HybridDetector:
         ):
             return "flash_crowd"
 
-        # Distributed flood (botnet-like)
-        if (
-            snap.unique_ip_count >= self.unique_ip_threshold * 0.7
-            and snap.src_ip_entropy >= 6.0
-            and (snap.syn_ack_ratio >= 3.0 or snap.udp_ratio >= 0.6)
-        ):
-            return "distributed_flood"
-
-        return "unknown"
-        
+        return "unknown" 
 
     def detect(self, snap: FeatureSnapshot) -> DetectionDecision:
         reasons: List[str] = []
