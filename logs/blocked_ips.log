@@ -509,3 +509,6 @@
 {"type": "block", "ip": "172.16.0.131", "reason": "attack:syn_flood:medium:score=84", "backend": "redis", "ok": true, "detail": "redis_block_ttl:30:offenses=2", "ts": 1773424179.655008}
 {"type": "block", "ip": "172.16.0.169", "reason": "attack:syn_flood:medium:score=84", "backend": "redis", "ok": true, "detail": "redis_block_ttl:60:offenses=6", "ts": 1773424179.656644}
 {"type": "block", "ip": "172.16.0.177", "reason": "attack:syn_flood:medium:score=84", "backend": "redis", "ok": true, "detail": "redis_block_ttl:30:offenses=2", "ts": 1773424179.6581812}
+{"type": "block", "ip": "10.0.0.77", "reason": "attack:tcp_ack_flood:medium:score=77", "backend": "redis", "ok": true, "detail": "redis_block_ttl:10:offenses=1", "ts": 1773426935.694166}
+{"type": "block", "ip": "10.0.0.77", "reason": "attack:tcp_ack_flood:medium:score=77", "backend": "redis", "ok": true, "detail": "redis_block_ttl:10:offenses=1", "ts": 1773427546.1271958}
+{"type": "block", "ip": "10.0.0.77", "reason": "attack:tcp_ack_flood:medium:score=77", "backend": "redis", "ok": true, "detail": "redis_block_ttl:30:offenses=2", "ts": 1773427709.847394}

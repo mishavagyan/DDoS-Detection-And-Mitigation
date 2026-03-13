@@ -1,5 +1,6 @@
 # main.py
 import time
+import logging
 from queue import Queue, Empty
 from typing import List
 
@@ -8,7 +9,7 @@ from capture import TrafficCapture, PacketEvent
 from features import FeatureExtractor
 from detection import HybridDetector
 from mitigation import Mitigator
-from logger import EventLogger
+from logger import EventLogger, setup_logging
 
 
 def drain_queue(q: Queue, max_items: int = 100000) -> List[PacketEvent]:
@@ -22,6 +23,9 @@ def drain_queue(q: Queue, max_items: int = 100000) -> List[PacketEvent]:
 
 
 def main():
+    setup_logging()
+    log = logging.getLogger("ddos")
+
     cfg = Config()
     q: Queue = Queue(maxsize=500000)
 
@@ -71,13 +75,19 @@ def main():
                 f"Redis backend selected, but Redis is unavailable at "
                 f"{cfg.redis_host}:{cfg.redis_port}/{cfg.redis_db}"
             )
+        log.info(
+            "Redis backend connected at %s:%s/%s",
+            cfg.redis_host,
+            cfg.redis_port,
+            cfg.redis_db,
+        )
 
     logger = EventLogger(events_path=cfg.events_log_path, blocked_path=cfg.blocked_log_path)
 
-    print("[*] Starting capture...")
+    log.info("Starting capture")
     capture.start()
 
-    print("[*] Running main loop. Press Ctrl+C to stop.")
+    log.info("Running main loop (Ctrl+C to stop)")
     try:
         while True:
             tick_start = time.time()
@@ -86,7 +96,7 @@ def main():
             if batch:
                 extractor.add_events(batch)
             elif cfg.capture_mode == "log" and capture.is_finished():
-                print("[*] Log replay finished. Exiting.")
+                log.info("Log replay finished. Exiting")
                 break
 
             snap = extractor.compute()
@@ -94,7 +104,7 @@ def main():
 
             expired = mitigator.cleanup_expired()
             for ip in expired:
-                print(f"[+] UNBLOCK (TTL expired): {ip}", flush=True)
+                log.info("UNBLOCK (TTL expired): %s", ip)
 
             features_dict = extractor.to_dict(snap)
             decision_dict = detector.to_dict(decision)
@@ -133,28 +143,42 @@ def main():
                 
                 active = mitigator.active_block_count()
                 
-                print(
-                    f"[!] ATTACK type={decision.attack_type} sev={decision.severity} score={decision.risk_score:.0f} "
-                    f"blocked={blocks} active_blocks={active} "
-                    f"pps={snap.packets_per_second:.1f} syn={snap.syn_packet_rate:.1f} "
-                    f"uniq={snap.unique_ip_count} syn_ratio={snap.syn_ratio:.2f} udp={snap.udp_ratio:.2f} "
-                    f"H={snap.src_ip_entropy:.2f} top_port_share={snap.top_dst_port_share:.2f}"
+                log.warning(
+                    "ATTACK type=%s sev=%s score=%s blocked=%s active_blocks=%s pps=%.1f syn=%.1f uniq=%s syn_ratio=%.2f udp=%.2f H=%.2f top_port_share=%.2f",
+                    decision.attack_type,
+                    decision.severity,
+                    int(decision.risk_score),
+                    blocks,
+                    active,
+                    snap.packets_per_second,
+                    snap.syn_packet_rate,
+                    snap.unique_ip_count,
+                    snap.syn_ratio,
+                    snap.udp_ratio,
+                    snap.src_ip_entropy,
+                    snap.top_dst_port_share,
                 )
             else:
-                print(
-                    f"[-] normal type={decision.attack_type} score={decision.risk_score:.0f} "
-                    f"pps={snap.packets_per_second:.1f} cps={snap.connections_per_second:.1f} "
-                    f"syn={snap.syn_packet_rate:.1f} uniq={snap.unique_ip_count} "
-                    f"syn_ratio={snap.syn_ratio:.2f} udp={snap.udp_ratio:.2f} "
-                    f"H={snap.src_ip_entropy:.2f} top_port_share={snap.top_dst_port_share:.2f} "
-                    f"top={snap.top_ips[:3]}"
+                log.debug(
+                    "normal type=%s score=%s pps=%.1f cps=%.1f syn=%.1f uniq=%s syn_ratio=%.2f udp=%.2f H=%.2f top_port_share=%.2f top=%s",
+                    decision.attack_type,
+                    int(decision.risk_score),
+                    snap.packets_per_second,
+                    snap.connections_per_second,
+                    snap.syn_packet_rate,
+                    snap.unique_ip_count,
+                    snap.syn_ratio,
+                    snap.udp_ratio,
+                    snap.src_ip_entropy,
+                    snap.top_dst_port_share,
+                    snap.top_ips[:3],
                 )
 
             elapsed = time.time() - tick_start
             time.sleep(max(0.0, cfg.tick_seconds - elapsed))
 
     except KeyboardInterrupt:
-        print("\n[*] Stopping...")
+        log.info("Stopping system")
     finally:
         capture.stop()
 

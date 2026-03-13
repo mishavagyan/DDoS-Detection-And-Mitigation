@@ -2,8 +2,34 @@
 import json
 import os
 import time
+import logging
 from typing import Any, Dict, Optional
 
+def setup_logging(level=logging.INFO, log_file="logs/system.log") -> None:
+    os.makedirs("logs", exist_ok=True)
+
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s",
+        "%Y-%m-%d %H:%M:%S",
+    )
+
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)  # allow all logs internally
+
+    if root.handlers:
+        root.handlers.clear()
+
+    # console handler (INFO+ only)
+    console = logging.StreamHandler()
+    console.setLevel(level)
+    console.setFormatter(formatter)
+    root.addHandler(console)
+
+    # file handler (DEBUG+)
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+    root.addHandler(file_handler)
 
 class EventLogger:
     def __init__(self, events_path: str, blocked_path: str):
