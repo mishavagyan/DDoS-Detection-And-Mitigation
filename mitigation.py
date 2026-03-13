@@ -2,7 +2,7 @@ import time
 import subprocess
 import ipaddress
 from dataclasses import dataclass
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Set
 
 from redis_store import RedisStore
 
@@ -26,6 +26,7 @@ class Mitigator:
         self.backend = backend
         self.block_seconds = block_seconds
         self._blocked_until: Dict[str, float] = {}
+        self._last_redis_blocks: Set[str] = set()
 
         self.allowlist = []
         for c in (allowlist_cidrs or []):
@@ -55,7 +56,15 @@ class Mitigator:
 
     def cleanup_expired(self) -> List[str]:
         if self.backend == "redis":
-            return []
+            if self.redis_store is None:
+                return []
+            try:
+                current = set(self.redis_store.list_blocked_ips())
+                expired = sorted(self._last_redis_blocks - current)
+                self._last_redis_blocks = current
+                return expired
+            except Exception:
+                return []
 
         now = time.time()
         expired = [ip for ip, until in self._blocked_until.items() if until <= now]

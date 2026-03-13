@@ -33,3 +33,7 @@ class RedisStore:
 
     def count_blocked(self) -> int:
         return len(self.r.keys("block:*"))
+
+    def list_blocked_ips(self) -> list[str]:
+        keys = self.r.keys("block:*")
+        return [k.split("block:", 1)[1] for k in keys if k.startswith("block:")]
