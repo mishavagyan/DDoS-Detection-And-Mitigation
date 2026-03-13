@@ -65,6 +65,13 @@ def main():
         redis_db=cfg.redis_db,
     )
 
+    if cfg.mitigation_backend == "redis":
+        if mitigator.redis_store is None or not mitigator.redis_store.ping():
+            raise RuntimeError(
+                f"Redis backend selected, but Redis is unavailable at "
+                f"{cfg.redis_host}:{cfg.redis_port}/{cfg.redis_db}"
+            )
+
     logger = EventLogger(events_path=cfg.events_log_path, blocked_path=cfg.blocked_log_path)
 
     print("[*] Starting capture...")
@@ -100,19 +107,23 @@ def main():
                     candidates = snap.top_ips[:]
 
                 blocks = 0
+                reason = f"attack:{decision.attack_type}:{decision.severity}:score={decision.risk_score:.0f}"
                 for ip, metric in candidates:
                     if blocks >= cfg.max_blocks_per_tick:
                         break
                     if ip.startswith("127.") or ip == "0.0.0.0":
                         continue
 
+                    if mitigator.is_blocked(ip):
+                        continue
+
                     res = mitigator.block_ip(
                         ip,
-                        reason=f"attack:{decision.attack_type}:{decision.severity}:score={decision.risk_score:.0f}"
+                        reason=reason,
                     )
                     logger.log_block(
                         ip=ip,
-                        reason=f"attack:{decision.attack_type}:{decision.severity}:score={decision.risk_score:.0f}",
+                        reason=reason,
                         backend=cfg.mitigation_backend,
                         ok=res.ok,
                         detail=res.detail,
