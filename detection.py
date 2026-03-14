@@ -27,6 +27,10 @@ class Hysteresis:
         self._above = 0
         self._below = 0
 
+    @property
+    def is_attack(self) -> bool:
+        return self._in_attack
+
     def update(self, score: float) -> bool:
         if not self._in_attack:
             self._above = self._above + 1 if score >= self.on_score else 0
@@ -61,7 +65,7 @@ class EWMABaseline:
         a = self.alpha
         prev_mean = self.mean
         self.mean = (1 - a) * self.mean + a * x
-        # EWMA variance update (approx)
+        # Approximate EWMA variance update
         self.var = (1 - a) * (self.var + a * (x - prev_mean) ** 2)
         self.n += 1
 
@@ -127,12 +131,9 @@ class HybridDetector:
         std = math.sqrt(var) if var > 1e-9 else 0.0
         return 0.0 if std == 0.0 else (x - mean) / std
 
-    
     def _classify(self, snap: FeatureSnapshot) -> str:
-        # ----------------------------------------------------
-        # Distributed flood (botnet-like attack)
-        # Many IPs + high entropy + high traffic
-        # ----------------------------------------------------
+        # Distributed / botnet-like flood:
+        # many sources, high source entropy, high total volume
         if (
             snap.unique_ip_count >= self.unique_ip_threshold * 0.7
             and snap.src_ip_entropy >= 5.5
@@ -140,9 +141,7 @@ class HybridDetector:
         ):
             return "distributed_flood"
 
-        # ----------------------------------------------------
-        # SYN flood (single or few attackers)
-        # ----------------------------------------------------
+        # SYN flood
         if (
             snap.tcp_ratio >= 0.6
             and snap.syn_ratio >= 0.6
@@ -150,9 +149,7 @@ class HybridDetector:
         ):
             return "syn_flood"
 
-        # ----------------------------------------------------
         # TCP ACK flood
-        # ----------------------------------------------------
         ack_ratio = (
             snap.ack_packet_rate / snap.packets_per_second
             if snap.packets_per_second > 0
@@ -167,15 +164,15 @@ class HybridDetector:
         ):
             return "tcp_ack_flood"
 
-        # ----------------------------------------------------
         # UDP flood
-        # ----------------------------------------------------
         if snap.udp_ratio >= 0.6 and snap.packets_per_second >= self.pps_threshold * 0.6:
             return "udp_flood"
 
-        # ----------------------------------------------------
-        # Flash crowd (legitimate traffic spike)
-        # ----------------------------------------------------
+        # ICMP flood
+        if snap.icmp_ratio >= 0.7 and snap.packets_per_second >= self.pps_threshold * 0.5:
+            return "icmp_flood"
+
+        # Flash crowd: high volume, but signs of legitimate completed traffic
         if (
             snap.packets_per_second >= self.pps_threshold * 0.9
             and snap.ack_packet_rate >= self.legit_ack_rate_min
@@ -184,37 +181,42 @@ class HybridDetector:
         ):
             return "flash_crowd"
 
-        return "unknown" 
+        return "unknown"
 
     def detect(self, snap: FeatureSnapshot) -> DetectionDecision:
         reasons: List[str] = []
 
-        # Candidates to block: only truly high per-IP talkers
+        # High per-IP talkers are the primary candidates for direct blocking.
         suspicious_ips = [(ip, rps) for ip, rps in snap.top_ips if rps >= self.per_ip_rps_threshold]
 
-        # z-scores
         z_pps = self._zscore(snap.packets_per_second, self.hist_pps)
         z_syn = self._zscore(snap.syn_packet_rate, self.hist_syn)
 
         score = 0.0
 
         # ----------- Fixed threshold contributions -----------
+
+        # Bulk packet pressure
         if snap.packets_per_second >= self.pps_threshold:
             score += 20
             reasons.append(f"PPS high: {snap.packets_per_second:.1f} >= {self.pps_threshold}")
 
+        # High connection rate
         if snap.connections_per_second >= self.cps_threshold:
             score += 10
             reasons.append(f"CPS high: {snap.connections_per_second:.1f} >= {self.cps_threshold}")
 
+        # SYN-heavy traffic
         if snap.syn_packet_rate >= self.syn_rate_threshold:
             score += 20
             reasons.append(f"SYN rate high: {snap.syn_packet_rate:.1f} >= {self.syn_rate_threshold}")
 
+        # Large number of distinct sources
         if snap.unique_ip_count >= self.unique_ip_threshold:
             score += 10
             reasons.append(f"Unique src IPs high: {snap.unique_ip_count} >= {self.unique_ip_threshold}")
 
+        # Strong per-IP offender(s)
         if suspicious_ips:
             score += 10
             reasons.append(f"Per-IP RPS high (top talker): max_ip_rps={snap.max_ip_rps:.1f}")
@@ -224,9 +226,7 @@ class HybridDetector:
             score += 20
             reasons.append(f"SYN/ACK imbalance: syn_ack_ratio={snap.syn_ack_ratio:.2f}")
 
-        # ----------------------------------------------------
-        # TCP ACK flood fingerprint (many ACKs, one talker dominating)
-        # ----------------------------------------------------
+        # TCP ACK flood fingerprint
         ack_ratio = (
             snap.ack_packet_rate / snap.packets_per_second
             if snap.packets_per_second > 0
@@ -244,13 +244,23 @@ class HybridDetector:
                 f"ACK flood fingerprint: ack_ratio={ack_ratio:.2f}, max_ip_rps={snap.max_ip_rps:.1f}"
             )
 
-        # Port concentration (typical for floods)
+        # UDP-heavy flood signal
+        if snap.udp_ratio >= 0.6 and snap.packets_per_second >= self.pps_threshold * 0.6:
+            score += 12
+            reasons.append(f"UDP flood fingerprint: udp_ratio={snap.udp_ratio:.2f}")
+
+        # ICMP-heavy flood signal
+        if snap.icmp_ratio >= 0.7 and snap.packets_per_second >= self.pps_threshold * 0.5:
+            score += 12
+            reasons.append(f"ICMP flood fingerprint: icmp_ratio={snap.icmp_ratio:.2f}")
+
+        # Port concentration is common in service-targeted floods
         if snap.top_dst_port_share >= 0.7 and snap.packets_per_second >= self.pps_threshold * 0.5:
             score += 6
             reasons.append(f"Port concentration: top_dst_port_share={snap.top_dst_port_share:.2f}")
 
         # ----------- Adaptive baseline contributions -----------
-        # Compare to baseline when warmed up
+
         if self.base_pps.n >= self.base_warmup:
             thr_pps = (self.base_pps.mean or 0.0) + self.base_k * self.base_pps.std()
             if snap.packets_per_second > thr_pps and thr_pps > 0:
@@ -263,21 +273,22 @@ class HybridDetector:
                 score += 8
                 reasons.append(f"Baseline SYN anomaly: {snap.syn_packet_rate:.1f} > {thr_syn:.1f}")
 
-        # z-score (optional extra)
+        # ----------- z-score contributions -----------
+
         if len(self.hist_pps) >= self.min_ticks_before_anomaly and z_pps >= self.anomaly_z:
             score += 6
             reasons.append(f"z(PPS)={z_pps:.2f} >= {self.anomaly_z}")
+
         if len(self.hist_syn) >= self.min_ticks_before_anomaly and z_syn >= self.anomaly_z:
             score += 6
             reasons.append(f"z(SYN)={z_syn:.2f} >= {self.anomaly_z}")
 
-        # ----------- Legitimate surge evidence (Black Friday protection) -----------
-        # If ACK is high and SYN/ACK ratio looks normal-ish, reduce risk.
-        # This indicates completed traffic, not half-open flood.
+        # ----------- Legitimate surge evidence -----------
+
         legit_evidence = (
-            snap.ack_packet_rate >= self.legit_ack_rate_min and
-            snap.syn_ack_ratio <= self.legit_syn_ack_ratio_max and
-            snap.max_ip_rps < (self.per_ip_rps_threshold * 0.7)  # no single super-spammer
+            snap.ack_packet_rate >= self.legit_ack_rate_min
+            and snap.syn_ack_ratio <= self.legit_syn_ack_ratio_max
+            and snap.max_ip_rps < (self.per_ip_rps_threshold * 0.7)
         )
         if legit_evidence:
             score -= self.legit_penalty
@@ -291,8 +302,7 @@ class HybridDetector:
         self.hist_pps.append(snap.packets_per_second)
         self.hist_syn.append(snap.syn_packet_rate)
 
-        # Update baseline ONLY when score is low (assume normal)
-        # This prevents poisoning baseline during attacks.
+        # Update baseline only for likely-normal traffic
         if score < 25:
             self.base_pps.update(snap.packets_per_second)
             self.base_syn.update(snap.syn_packet_rate)
@@ -300,16 +310,22 @@ class HybridDetector:
         is_attack = self.hyst.update(score)
         attack_type = self._classify(snap)
 
-        # if is_attack and attack_type == "unknown":
-        #     attack_type = "generic_flood"
+        # If traffic is strong enough to be considered an attack but no
+        # specific fingerprint matched, label it as a generic flood.
+        if is_attack and attack_type == "unknown":
+            attack_type = "generic_flood"
+
+        # During distributed floods, top-IP thresholds may not always catch
+        # any single offender. In that case, keep the visible top talkers
+        # as fallback investigation candidates.
+        if is_attack and not suspicious_ips and attack_type == "distributed_flood":
+            suspicious_ips = snap.top_ips[:]
 
         # Severity by score
         if score >= 85:
             severity = "high"
         elif score >= 65:
             severity = "medium"
-        elif score >= 40:
-            severity = "low"
         else:
             severity = "low"
 

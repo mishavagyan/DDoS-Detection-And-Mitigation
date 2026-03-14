@@ -1,3 +1,4 @@
+# mitigation.py
 import time
 import subprocess
 import ipaddress
@@ -68,8 +69,15 @@ class Mitigator:
 
         now = time.time()
         expired = [ip for ip, until in self._blocked_until.items() if until <= now]
+
         for ip in expired:
+            if self.backend == "iptables":
+                self._unblock_ip_iptables(ip)
+            elif self.backend == "nft":
+                self._unblock_ip_nft(ip)
+
             self._blocked_until.pop(ip, None)
+
         return expired
 
     def block_ip(self, ip: str, reason: str = "attack") -> MitigationResult:
@@ -106,6 +114,11 @@ class Mitigator:
                 return MitigationResult(ok=False, detail=f"redis_exception:{e}")
 
         if self.backend == "iptables":
+            # Avoid duplicate rule insertion if already blocked
+            if self.is_blocked(ip):
+                self._blocked_until[ip] = max(self._blocked_until.get(ip, 0), until)
+                return MitigationResult(ok=True, detail=f"already_blocked_extend_until:{self._blocked_until[ip]:.0f}")
+
             cmd = ["iptables", "-I", "INPUT", "-s", ip, "-j", "DROP"]
             res = self._run(cmd)
             if res.ok:
@@ -117,6 +130,11 @@ class Mitigator:
             return self._run(cmd)
 
         if self.backend == "nft":
+            # Avoid duplicate rule insertion if already blocked
+            if self.is_blocked(ip):
+                self._blocked_until[ip] = max(self._blocked_until.get(ip, 0), until)
+                return MitigationResult(ok=True, detail=f"already_blocked_extend_until:{self._blocked_until[ip]:.0f}")
+
             cmd = ["nft", "add", "rule", "inet", "ddosprot", "input", "ip", "saddr", ip, "drop"]
             res = self._run(cmd)
             if res.ok:
@@ -125,19 +143,33 @@ class Mitigator:
 
         return MitigationResult(ok=False, detail=f"unknown_backend:{self.backend}")
 
-    def _run(self, cmd) -> MitigationResult:
+    def _unblock_ip_iptables(self, ip: str) -> MitigationResult:
+        cmd = ["iptables", "-D", "INPUT", "-s", ip, "-j", "DROP"]
+        return self._run(cmd)
+
+    def _unblock_ip_nft(self, ip: str) -> MitigationResult:
+        # This assumes the same rule shape was inserted earlier.
+        # Depending on nft setup, deleting by exact rule may or may not work.
+        cmd = ["nft", "delete", "rule", "inet", "ddosprot", "input", "ip", "saddr", ip, "drop"]
+        return self._run(cmd)
+
+    def _run(self, cmd: List[str]) -> MitigationResult:
         try:
             p = subprocess.run(cmd, capture_output=True, text=True, check=False)
             if p.returncode == 0:
                 return MitigationResult(ok=True, detail=p.stdout.strip() or "ok")
-            return MitigationResult(ok=False, detail=(p.stderr.strip() or p.stdout.strip() or f"rc={p.returncode}"))
+            return MitigationResult(
+                ok=False,
+                detail=(p.stderr.strip() or p.stdout.strip() or f"rc={p.returncode}")
+            )
         except FileNotFoundError:
             return MitigationResult(ok=False, detail=f"command_not_found:{cmd[0]}")
         except Exception as e:
             return MitigationResult(ok=False, detail=f"exception:{e}")
-        
+
     def active_block_count(self) -> int:
         if self.backend == "redis" and self.redis_store is not None:
             return self.redis_store.count_blocked()
+
         now = time.time()
-        return sum(1 for _, until in self._blocked_until.items() if until > now)
+        return sum(1 for until in self._blocked_until.values() if until > now)

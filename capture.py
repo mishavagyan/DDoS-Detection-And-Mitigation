@@ -1,6 +1,7 @@
 # capture.py
 import threading
 import time
+import queue
 from dataclasses import dataclass
 from queue import Queue
 from typing import Optional, Iterator
@@ -45,6 +46,11 @@ class TrafficCapture:
         self._finished = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
+        # Diagnostics / observability counters
+        self.dropped_packets = 0
+        self.parse_errors = 0
+        self.packet_errors = 0
+
     def start(self) -> None:
         self._stop.clear()
         self._finished.clear()
@@ -70,9 +76,15 @@ class TrafficCapture:
     def is_finished(self) -> bool:
         return self._finished.is_set()
 
+    def _enqueue_event(self, ev: PacketEvent) -> None:
+        try:
+            self.q.put_nowait(ev)
+        except queue.Full:
+            self.dropped_packets += 1
+
     def _on_packet(self, pkt) -> None:
         try:
-            if IP not in pkt:
+            if IP is None or IP not in pkt:
                 return
 
             src_ip = pkt[IP].src
@@ -105,9 +117,9 @@ class TrafficCapture:
                 dst_port=dp,
                 length=len(pkt) if pkt is not None else None,
             )
-            self.q.put(ev)
+            self._enqueue_event(ev)
         except Exception:
-            pass
+            self.packet_errors += 1
 
     def _run_scapy(self) -> None:
         try:
@@ -116,6 +128,7 @@ class TrafficCapture:
                 filter=self.bpf_filter,
                 prn=self._on_packet,
                 store=False,
+                stop_filter=lambda _: self._stop.is_set(),
             )
         finally:
             self._finished.set()
@@ -127,17 +140,22 @@ class TrafficCapture:
 
         parts = line.split()
         if len(parts) < 5:
+            self.parse_errors += 1
             return None
 
-        ts = float(parts[0])
-        src_ip = parts[1]
-        dst_ip = parts[2]
-        proto = parts[3]
-        flags = parts[4]
+        try:
+            ts = float(parts[0])
+            src_ip = parts[1]
+            dst_ip = parts[2]
+            proto = parts[3]
+            flags = parts[4]
 
-        sp = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else None
-        dp = int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else None
-        length = int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else None
+            sp = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else None
+            dp = int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else None
+            length = int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else None
+        except Exception:
+            self.parse_errors += 1
+            return None
 
         return PacketEvent(
             ts=ts,
@@ -154,7 +172,7 @@ class TrafficCapture:
         with open(self.log_source_path, "r", encoding="utf-8") as f:
             for line in f:
                 ev = self._parse_log_line(line)
-                if ev:
+                if ev is not None:
                     yield ev
 
     def _run_log(self) -> None:
@@ -176,6 +194,6 @@ class TrafficCapture:
                         break
                     time.sleep(0.001)
 
-                self.q.put(ev)
+                self._enqueue_event(ev)
         finally:
             self._finished.set()

@@ -13,7 +13,7 @@ from logger import EventLogger, setup_logging
 
 
 def drain_queue(q: Queue, max_items: int = 100000) -> List[PacketEvent]:
-    items = []
+    items: List[PacketEvent] = []
     for _ in range(max_items):
         try:
             items.append(q.get_nowait())
@@ -22,7 +22,7 @@ def drain_queue(q: Queue, max_items: int = 100000) -> List[PacketEvent]:
     return items
 
 
-def main():
+def main() -> None:
     setup_logging()
     log = logging.getLogger("ddos")
 
@@ -63,7 +63,7 @@ def main():
     mitigator = Mitigator(
         backend=cfg.mitigation_backend,
         block_seconds=cfg.block_seconds,
-        allowlist_cidrs=getattr(cfg, "allowlist_cidrs", []),
+        allowlist_cidrs=cfg.allowlist_cidrs,
         redis_host=cfg.redis_host,
         redis_port=cfg.redis_port,
         redis_db=cfg.redis_db,
@@ -92,15 +92,21 @@ def main():
         while True:
             tick_start = time.time()
 
-            batch = drain_queue(q)
+            batch = drain_queue(q, max_items=100000)
             if batch:
                 extractor.add_events(batch)
             elif cfg.capture_mode == "log" and capture.is_finished():
                 log.info("Log replay finished. Exiting")
                 break
 
-            snap = extractor.compute()
-            decision = detector.detect(snap)
+            try:
+                snap = extractor.compute()
+                decision = detector.detect(snap)
+            except Exception as e:
+                log.exception("Failed to compute features or detection decision: %s", e)
+                elapsed = time.time() - tick_start
+                time.sleep(max(0.0, cfg.tick_seconds - elapsed))
+                continue
 
             expired = mitigator.cleanup_expired()
             for ip in expired:
@@ -118,19 +124,16 @@ def main():
 
                 blocks = 0
                 reason = f"attack:{decision.attack_type}:{decision.severity}:score={decision.risk_score:.0f}"
+
                 for ip, metric in candidates:
                     if blocks >= cfg.max_blocks_per_tick:
                         break
-                    if ip.startswith("127.") or ip == "0.0.0.0":
-                        continue
 
                     if mitigator.is_blocked(ip):
                         continue
 
-                    res = mitigator.block_ip(
-                        ip,
-                        reason=reason,
-                    )
+                    res = mitigator.block_ip(ip, reason=reason)
+
                     logger.log_block(
                         ip=ip,
                         reason=reason,
@@ -138,13 +141,16 @@ def main():
                         ok=res.ok,
                         detail=res.detail,
                     )
+
                     if res.ok:
                         blocks += 1
-                
+
                 active = mitigator.active_block_count()
-                
+
                 log.warning(
-                    "ATTACK type=%s sev=%s score=%s blocked=%s active_blocks=%s pps=%.1f syn=%.1f uniq=%s syn_ratio=%.2f udp=%.2f H=%.2f top_port_share=%.2f",
+                    "ATTACK type=%s sev=%s score=%s blocked=%s active_blocks=%s "
+                    "pps=%.1f syn=%.1f uniq=%s syn_ratio=%.2f udp=%.2f icmp=%.2f "
+                    "H=%.2f top_port_share=%.2f dropped=%s parse_errors=%s packet_errors=%s",
                     decision.attack_type,
                     decision.severity,
                     int(decision.risk_score),
@@ -155,12 +161,18 @@ def main():
                     snap.unique_ip_count,
                     snap.syn_ratio,
                     snap.udp_ratio,
+                    snap.icmp_ratio,
                     snap.src_ip_entropy,
                     snap.top_dst_port_share,
+                    capture.dropped_packets,
+                    capture.parse_errors,
+                    capture.packet_errors,
                 )
             else:
                 log.debug(
-                    "normal type=%s score=%s pps=%.1f cps=%.1f syn=%.1f uniq=%s syn_ratio=%.2f udp=%.2f H=%.2f top_port_share=%.2f top=%s",
+                    "normal type=%s score=%s pps=%.1f cps=%.1f syn=%.1f uniq=%s "
+                    "syn_ratio=%.2f udp=%.2f icmp=%.2f H=%.2f top_port_share=%.2f "
+                    "top=%s dropped=%s parse_errors=%s packet_errors=%s",
                     decision.attack_type,
                     int(decision.risk_score),
                     snap.packets_per_second,
@@ -169,9 +181,13 @@ def main():
                     snap.unique_ip_count,
                     snap.syn_ratio,
                     snap.udp_ratio,
+                    snap.icmp_ratio,
                     snap.src_ip_entropy,
                     snap.top_dst_port_share,
                     snap.top_ips[:3],
+                    capture.dropped_packets,
+                    capture.parse_errors,
+                    capture.packet_errors,
                 )
 
             elapsed = time.time() - tick_start
@@ -181,6 +197,10 @@ def main():
         log.info("Stopping system")
     finally:
         capture.stop()
+        try:
+            logger.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
