@@ -1,0 +1,20 @@
+[Unit]
+Description=Host-level DDoS detection and mitigation controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ddos_protection
+ExecStart=/opt/ddos_protection/.venv/bin/python /opt/ddos_protection/main.py
+Restart=always
+RestartSec=2
+User=root
+Group=root
+
+# Keep log output in journald.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

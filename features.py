@@ -1,6 +1,7 @@
 # features.py
 import math
 import heapq
+import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Deque, Dict, List, Tuple, Any, Optional
@@ -54,9 +55,15 @@ class FeatureExtractor:
     Sliding window features using event timestamps.
     Works for both live capture and replay mode.
     """
-    def __init__(self, window_seconds: int, top_n_ips: int = 10):
+    def __init__(
+        self,
+        window_seconds: int,
+        top_n_ips: int = 10,
+        advance_with_wall_clock: bool = False,
+    ):
         self.window_seconds = window_seconds
         self.top_n_ips = max(1, top_n_ips)
+        self.advance_with_wall_clock = advance_with_wall_clock
         self.events: Deque[PacketEvent] = deque()
         self._last_ts: Optional[float] = None
 
@@ -71,7 +78,11 @@ class FeatureExtractor:
         self._prune(self._now_ts())
 
     def _now_ts(self) -> float:
-        return self._last_ts if self._last_ts is not None else 0.0
+        event_ts = self._last_ts if self._last_ts is not None else 0.0
+        if self.advance_with_wall_clock:
+            # In live capture mode, keep the window moving even when traffic pauses.
+            return max(event_ts, time.time())
+        return event_ts
 
     def _prune(self, now_ts: float) -> None:
         cutoff = now_ts - self.window_seconds

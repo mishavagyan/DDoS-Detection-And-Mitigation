@@ -22,6 +22,28 @@ def drain_queue(q: Queue, max_items: int = 100000) -> List[PacketEvent]:
     return items
 
 
+def mitigation_level_from_score(score: float, pps: float, cfg: Config) -> str:
+    if score >= 75 or pps >= cfg.aggregate_pps_attack:
+        return "under_attack"
+    if score >= 45 or pps >= cfg.aggregate_pps_elevated:
+        return "elevated"
+    return "normal"
+
+
+def should_apply_ip_blocks(decision, cfg: Config) -> bool:
+    if cfg.mitigation_policy_mode == "observe":
+        return False
+    if cfg.mitigation_policy_mode == "enforce":
+        return True
+    # In soft mode, only allow direct IP actions for high-confidence cases.
+    return (
+        decision.risk_score >= cfg.soft_block_min_score
+        and decision.severity == "high"
+        and bool(decision.suspicious_ips)
+        and decision.attack_type not in {"distributed_flood", "flash_crowd"}
+    )
+
+
 def main() -> None:
     setup_logging()
     log = logging.getLogger("ddos")
@@ -37,7 +59,10 @@ def main() -> None:
         log_source_path=cfg.log_source_path,
     )
 
-    extractor = FeatureExtractor(window_seconds=cfg.feature_window_seconds)
+    extractor = FeatureExtractor(
+        window_seconds=cfg.feature_window_seconds,
+        advance_with_wall_clock=(cfg.capture_mode == "scapy"),
+    )
 
     detector = HybridDetector(
         pps_threshold=cfg.pps_threshold,
@@ -63,6 +88,7 @@ def main() -> None:
     mitigator = Mitigator(
         backend=cfg.mitigation_backend,
         block_seconds=cfg.block_seconds,
+        policy_mode=cfg.mitigation_policy_mode,
         allowlist_cidrs=cfg.allowlist_cidrs,
         redis_host=cfg.redis_host,
         redis_port=cfg.redis_port,
@@ -108,6 +134,20 @@ def main() -> None:
                 time.sleep(max(0.0, cfg.tick_seconds - elapsed))
                 continue
 
+            level = mitigation_level_from_score(decision.risk_score, snap.packets_per_second, cfg)
+            if level == "under_attack":
+                syn_limit = cfg.syn_rate_limit_attack
+                udp_limit = cfg.udp_rate_limit_attack
+                icmp_limit = cfg.icmp_rate_limit_attack
+            else:
+                syn_limit = cfg.syn_rate_limit_elevated
+                udp_limit = cfg.udp_rate_limit_elevated
+                icmp_limit = cfg.icmp_rate_limit_elevated
+
+            level_res = mitigator.set_attack_level(level, syn_limit, udp_limit, icmp_limit)
+            if not level_res.ok:
+                log.error("Failed to set mitigation level=%s: %s", level, level_res.detail)
+
             expired = mitigator.cleanup_expired()
             for ip in expired:
                 log.info("UNBLOCK (TTL expired): %s", ip)
@@ -119,14 +159,23 @@ def main() -> None:
                 logger.log_detection(features_dict, decision_dict)
 
                 candidates = decision.suspicious_ips[:]
-                if not candidates and decision.risk_score >= 80:
+                if (
+                    not candidates
+                    and decision.risk_score >= 80
+                    and decision.attack_type != "distributed_flood"
+                    and cfg.mitigation_policy_mode == "enforce"
+                ):
                     candidates = snap.top_ips[:]
 
                 blocks = 0
                 reason = f"attack:{decision.attack_type}:{decision.severity}:score={decision.risk_score:.0f}"
+                do_ip_blocks = should_apply_ip_blocks(decision, cfg)
 
+                max_new_blocks = min(cfg.max_blocks_per_tick, cfg.max_new_blocks_per_tick)
                 for ip, metric in candidates:
-                    if blocks >= cfg.max_blocks_per_tick:
+                    if not do_ip_blocks:
+                        break
+                    if blocks >= max_new_blocks:
                         break
 
                     if mitigator.is_blocked(ip):
@@ -148,11 +197,12 @@ def main() -> None:
                 active = mitigator.active_block_count()
 
                 log.warning(
-                    "ATTACK type=%s sev=%s score=%s blocked=%s active_blocks=%s "
+                    "ATTACK type=%s sev=%s level=%s score=%s blocked=%s active_blocks=%s "
                     "pps=%.1f syn=%.1f uniq=%s syn_ratio=%.2f udp=%.2f icmp=%.2f "
                     "H=%.2f top_port_share=%.2f dropped=%s parse_errors=%s packet_errors=%s",
                     decision.attack_type,
                     decision.severity,
+                    level,
                     int(decision.risk_score),
                     blocks,
                     active,
@@ -170,10 +220,11 @@ def main() -> None:
                 )
             else:
                 log.debug(
-                    "normal type=%s score=%s pps=%.1f cps=%.1f syn=%.1f uniq=%s "
+                    "normal type=%s level=%s score=%s pps=%.1f cps=%.1f syn=%.1f uniq=%s "
                     "syn_ratio=%.2f udp=%.2f icmp=%.2f H=%.2f top_port_share=%.2f "
                     "top=%s dropped=%s parse_errors=%s packet_errors=%s",
                     decision.attack_type,
+                    level,
                     int(decision.risk_score),
                     snap.packets_per_second,
                     snap.connections_per_second,

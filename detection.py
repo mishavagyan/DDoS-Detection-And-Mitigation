@@ -193,37 +193,44 @@ class HybridDetector:
         z_syn = self._zscore(snap.syn_packet_rate, self.hist_syn)
 
         score = 0.0
+        trigger_signals = 0
 
         # ----------- Fixed threshold contributions -----------
 
         # Bulk packet pressure
         if snap.packets_per_second >= self.pps_threshold:
             score += 20
+            trigger_signals += 1
             reasons.append(f"PPS high: {snap.packets_per_second:.1f} >= {self.pps_threshold}")
 
         # High connection rate
         if snap.connections_per_second >= self.cps_threshold:
             score += 10
+            trigger_signals += 1
             reasons.append(f"CPS high: {snap.connections_per_second:.1f} >= {self.cps_threshold}")
 
         # SYN-heavy traffic
         if snap.syn_packet_rate >= self.syn_rate_threshold:
             score += 20
+            trigger_signals += 1
             reasons.append(f"SYN rate high: {snap.syn_packet_rate:.1f} >= {self.syn_rate_threshold}")
 
         # Large number of distinct sources
         if snap.unique_ip_count >= self.unique_ip_threshold:
             score += 10
+            trigger_signals += 1
             reasons.append(f"Unique src IPs high: {snap.unique_ip_count} >= {self.unique_ip_threshold}")
 
         # Strong per-IP offender(s)
         if suspicious_ips:
             score += 10
+            trigger_signals += 1
             reasons.append(f"Per-IP RPS high (top talker): max_ip_rps={snap.max_ip_rps:.1f}")
 
         # SYN flood fingerprint
         if snap.syn_ack_ratio >= 3.0 and snap.syn_packet_rate >= self.syn_rate_threshold * 0.6:
             score += 20
+            trigger_signals += 1
             reasons.append(f"SYN/ACK imbalance: syn_ack_ratio={snap.syn_ack_ratio:.2f}")
 
         # TCP ACK flood fingerprint
@@ -240,6 +247,7 @@ class HybridDetector:
             and snap.packets_per_second >= self.pps_threshold * 0.8
         ):
             score += 25
+            trigger_signals += 1
             reasons.append(
                 f"ACK flood fingerprint: ack_ratio={ack_ratio:.2f}, max_ip_rps={snap.max_ip_rps:.1f}"
             )
@@ -247,16 +255,19 @@ class HybridDetector:
         # UDP-heavy flood signal
         if snap.udp_ratio >= 0.6 and snap.packets_per_second >= self.pps_threshold * 0.6:
             score += 12
+            trigger_signals += 1
             reasons.append(f"UDP flood fingerprint: udp_ratio={snap.udp_ratio:.2f}")
 
         # ICMP-heavy flood signal
         if snap.icmp_ratio >= 0.7 and snap.packets_per_second >= self.pps_threshold * 0.5:
             score += 12
+            trigger_signals += 1
             reasons.append(f"ICMP flood fingerprint: icmp_ratio={snap.icmp_ratio:.2f}")
 
         # Port concentration is common in service-targeted floods
         if snap.top_dst_port_share >= 0.7 and snap.packets_per_second >= self.pps_threshold * 0.5:
             score += 6
+            trigger_signals += 1
             reasons.append(f"Port concentration: top_dst_port_share={snap.top_dst_port_share:.2f}")
 
         # ----------- Adaptive baseline contributions -----------
@@ -265,22 +276,26 @@ class HybridDetector:
             thr_pps = (self.base_pps.mean or 0.0) + self.base_k * self.base_pps.std()
             if snap.packets_per_second > thr_pps and thr_pps > 0:
                 score += 10
+                trigger_signals += 1
                 reasons.append(f"Baseline PPS anomaly: {snap.packets_per_second:.1f} > {thr_pps:.1f}")
 
         if self.base_syn.n >= self.base_warmup:
             thr_syn = (self.base_syn.mean or 0.0) + self.base_k * self.base_syn.std()
             if snap.syn_packet_rate > thr_syn and thr_syn > 0:
                 score += 8
+                trigger_signals += 1
                 reasons.append(f"Baseline SYN anomaly: {snap.syn_packet_rate:.1f} > {thr_syn:.1f}")
 
         # ----------- z-score contributions -----------
 
         if len(self.hist_pps) >= self.min_ticks_before_anomaly and z_pps >= self.anomaly_z:
             score += 6
+            trigger_signals += 1
             reasons.append(f"z(PPS)={z_pps:.2f} >= {self.anomaly_z}")
 
         if len(self.hist_syn) >= self.min_ticks_before_anomaly and z_syn >= self.anomaly_z:
             score += 6
+            trigger_signals += 1
             reasons.append(f"z(SYN)={z_syn:.2f} >= {self.anomaly_z}")
 
         # ----------- Legitimate surge evidence -----------
@@ -295,6 +310,12 @@ class HybridDetector:
             reasons.append(
                 f"Legit surge evidence: ack_rate={snap.ack_packet_rate:.1f}, syn_ack_ratio={snap.syn_ack_ratio:.2f}, max_ip_rps={snap.max_ip_rps:.1f}"
             )
+
+        # Require corroborating signals before pushing into high confidence.
+        # This avoids one noisy metric creating an aggressive mitigation path.
+        if trigger_signals <= 1 and score > 40:
+            score = max(0.0, score - 15.0)
+            reasons.append("Low confidence: insufficient corroborating signals")
 
         score = max(0.0, min(100.0, score))
 

@@ -6,9 +6,9 @@ from typing import List
 @dataclass
 class Config:
     # Capture
-    interface: str = "en0"
+    interface: str = "eth0"
     bpf_filter: str = "ip"
-    capture_mode: str = "log"   # "scapy" or "log"
+    capture_mode: str = "scapy"   # "scapy" or "log"
     log_source_path: str = "sample_traffic.log"
 
     # Timing
@@ -43,12 +43,22 @@ class Config:
     attack_off_windows: int = 3
 
     # Mitigation
-    mitigation_backend: str = "redis"  # "sim", "none", "iptables", "nft", "ipset", "redis"
-    block_seconds: int = 10
+    mitigation_backend: str = "nft"  # "sim", "none", "iptables", "nft", "ipset", "redis"
+    mitigation_policy_mode: str = "soft"  # "observe", "soft", "enforce"
+    block_seconds: int = 30
     max_blocks_per_tick: int = 50
+    max_new_blocks_per_tick: int = 20
+    soft_block_min_score: float = 85.0
+    aggregate_pps_elevated: int = 1200
+    aggregate_pps_attack: int = 2500
+    syn_rate_limit_elevated: int = 250
+    syn_rate_limit_attack: int = 100
+    udp_rate_limit_elevated: int = 1200
+    udp_rate_limit_attack: int = 500
+    icmp_rate_limit_elevated: int = 200
+    icmp_rate_limit_attack: int = 80
     allowlist_cidrs: List[str] = field(default_factory=lambda: [
         "127.0.0.0/8",
-        "192.168.0.0/16",
     ])
 
     # Logging
@@ -65,12 +75,18 @@ class Config:
     def __post_init__(self) -> None:
         valid_capture_modes = {"scapy", "log"}
         valid_backends = {"sim", "none", "iptables", "nft", "ipset", "redis"}
+        valid_policy_modes = {"observe", "soft", "enforce"}
 
         if self.capture_mode not in valid_capture_modes:
             raise ValueError(f"capture_mode must be one of {sorted(valid_capture_modes)}, got {self.capture_mode!r}")
 
         if self.mitigation_backend not in valid_backends:
             raise ValueError(f"mitigation_backend must be one of {sorted(valid_backends)}, got {self.mitigation_backend!r}")
+
+        if self.mitigation_policy_mode not in valid_policy_modes:
+            raise ValueError(
+                f"mitigation_policy_mode must be one of {sorted(valid_policy_modes)}, got {self.mitigation_policy_mode!r}"
+            )
 
         if self.tick_seconds <= 0:
             raise ValueError("tick_seconds must be positive")
@@ -137,6 +153,32 @@ class Config:
 
         if self.max_blocks_per_tick < 1:
             raise ValueError("max_blocks_per_tick must be at least 1")
+
+        if self.max_new_blocks_per_tick < 1:
+            raise ValueError("max_new_blocks_per_tick must be at least 1")
+
+        if self.max_new_blocks_per_tick > self.max_blocks_per_tick:
+            raise ValueError("max_new_blocks_per_tick cannot be greater than max_blocks_per_tick")
+
+        if self.soft_block_min_score < 0 or self.soft_block_min_score > 100:
+            raise ValueError("soft_block_min_score must be in [0, 100]")
+
+        if self.aggregate_pps_elevated <= 0 or self.aggregate_pps_attack <= 0:
+            raise ValueError("aggregate pps thresholds must be positive")
+
+        if self.aggregate_pps_elevated >= self.aggregate_pps_attack:
+            raise ValueError("aggregate_pps_elevated must be lower than aggregate_pps_attack")
+
+        for field_name in (
+            "syn_rate_limit_elevated",
+            "syn_rate_limit_attack",
+            "udp_rate_limit_elevated",
+            "udp_rate_limit_attack",
+            "icmp_rate_limit_elevated",
+            "icmp_rate_limit_attack",
+        ):
+            if getattr(self, field_name) <= 0:
+                raise ValueError(f"{field_name} must be positive")
 
         if self.redis_port <= 0 or self.redis_port > 65535:
             raise ValueError("redis_port must be in the range 1..65535")
